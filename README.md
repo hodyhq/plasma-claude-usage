@@ -2,7 +2,7 @@
 
 A KDE Plasma 6 widget that displays your Claude Code usage statistics in the taskbar.
 
-![Popup](screenshots/popup.png)
+![Popup](screenshots/popup_2.1.png)
 
 ## Features
 
