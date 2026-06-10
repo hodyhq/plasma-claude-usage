@@ -16,6 +16,7 @@ KCM.SimpleKCM {
     property int cfg_refreshInterval
     property string cfg_panelLayout
     property bool cfg_showIcon
+    property bool cfg_enableNotifications
     property bool cfg_showSession
     property bool cfg_showWeekly
     property bool cfg_showSonnet
@@ -83,6 +84,13 @@ KCM.SimpleKCM {
             color: Kirigami.Theme.negativeTextColor
             font.italic: true
             Layout.fillWidth: true
+        }
+
+        QQC2.CheckBox {
+            Kirigami.FormData.label: tr("Notifications:")
+            text: tr("Threshold and reset notifications")
+            checked: cfg_enableNotifications
+            onCheckedChanged: cfg_enableNotifications = checked
         }
 
         Kirigami.Separator {
