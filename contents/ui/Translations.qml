@@ -75,7 +75,17 @@ QtObject {
             "Other models aren't reported by the API yet": "Other models aren't reported by the API yet",
             "Today's Tokens": "Today's Tokens",
             "local logs": "local logs",
-            "out": "out"
+            "out": "out",
+            "Extra Usage": "Extra Usage",
+            "spent": "spent",
+            "Updated {duration} ago": "Updated {duration} ago",
+            "Next update in {duration}": "Next update in {duration}",
+            "Usage Notice": "Usage Notice",
+            "usage has reached": "usage has reached",
+            "Quota Reset": "Quota Reset",
+            "quota has been reset. Claude is ready to use again.": "quota has been reset. Claude is ready to use again.",
+            "Notifications:": "Notifications:",
+            "Threshold and reset notifications": "Threshold and reset notifications"
         },
         "hu_HU": {
             "Claude Usage": "Claude használat",
