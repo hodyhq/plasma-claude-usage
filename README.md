@@ -23,7 +23,7 @@ A KDE Plasma 6 widget that displays your Claude Code usage statistics in the tas
 - **Error Handling**: Clear messages when not logged in, token expired, or rate limited
 - **Custom API Support**: Optional proxy/gateway with custom base URL and API key
 - **15 Languages**: EN, HU, DE, FR, ES, IT, PT, RU, PL, NL, TR, JA, KO, ZH-CN, ZH-TW
-- **No Dependencies**: Pure QML, no Python or external tools required
+- **Minimal Dependencies**: Pure QML core; optional `python3` powers only the Today's Tokens card
 
 ## Requirements
 
