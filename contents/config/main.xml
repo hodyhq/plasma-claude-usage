@@ -34,6 +34,10 @@
             <label>Show Sonnet weekly usage in panel</label>
             <default>false</default>
         </entry>
+        <entry name="enableNotifications" type="Bool">
+            <label>Send desktop notifications for usage thresholds and quota resets</label>
+            <default>true</default>
+        </entry>
         <entry name="baseUrl" type="String">
             <label>Custom API base URL (leave empty to use ~/.claude/.credentials.json)</label>
             <default></default>
