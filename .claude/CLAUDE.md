@@ -14,7 +14,9 @@ The widget is **pure QML** with no external dependencies:
 
 ## Key Files
 
-- `contents/ui/main.qml` - All widget logic and UI
+- `contents/ui/main.qml` - Data layer: credentials, API fetch, cache, timers
+- `contents/ui/CompactView.qml` / `FullView.qml` - Panel and popup UI
+- `contents/ui/UsageRing.qml`, `ModelRow.qml`, `TrendChart.qml` - Reusable components
 - `contents/icons/claude.svg` - Claude logo (orange #D97757)
 - `metadata.json` - Plasma widget metadata
 - `install.sh` - Installation script

@@ -6,14 +6,16 @@ A KDE Plasma 6 widget that displays your Claude Code usage statistics in the tas
 
 ## Features
 
-- **Compact Panel Display**: Shows session and weekly usage percentages right in your taskbar
+- **Mini Rings Panel Display**: Anti-aliased progress rings with percentages right in your taskbar
   ![Panel](screenshots/panel.png)
 - **Color-coded Indicators**: Green (<50%), Yellow (<80%), Red (≥80%)
-- **Detailed Popup**: Click to see full statistics
-  - Session and weekly usage with progress bars
-  - Reset times for both limits
-  - Per-model breakdown (Sonnet/Opus)
-  - Your subscription plan badge
+- **Modern Card Popup**: Click to see full statistics
+  - Account card with your email and subscription plan
+  - Session and weekly usage as progress rings with reset countdowns
+  - Dynamic per-model breakdown (Fable 5, Opus, Sonnet — new models appear automatically)
+  - 7-day usage trend sparkline (built from locally cached samples)
+- **Claude Code Update Indicator**: Orange chip + panel dot when a newer CLI version exists; click to run `claude update`
+- **Today's Tokens**: Per-model token counts (including models the API doesn't report, like Fable 5) parsed from local Claude Code transcripts — needs `python3`, card hides if unavailable
 - **Configurable Refresh**: Default 5 min polling (adjustable in settings)
 - **Smart Rate Limit Handling**: Uses `retry-after` header, exponential backoff, and token watcher for automatic recovery
 - **Local Cache**: Remembers last data on restart (up to 24h)
@@ -21,7 +23,7 @@ A KDE Plasma 6 widget that displays your Claude Code usage statistics in the tas
 - **Error Handling**: Clear messages when not logged in, token expired, or rate limited
 - **Custom API Support**: Optional proxy/gateway with custom base URL and API key
 - **15 Languages**: EN, HU, DE, FR, ES, IT, PT, RU, PL, NL, TR, JA, KO, ZH-CN, ZH-TW
-- **No Dependencies**: Pure QML, no Python or external tools required
+- **Minimal Dependencies**: Pure QML core; optional `python3` powers only the Today's Tokens card
 
 ## Requirements
 
@@ -140,7 +142,12 @@ claude-usage-widget/
 │   ├── config/
 │   │   └── main.xml        # Configuration schema
 │   ├── ui/
-│   │   ├── main.qml        # Widget implementation
+│   │   ├── main.qml        # Data layer: credentials, API, cache, timers
+│   │   ├── CompactView.qml # Panel UI (mini rings)
+│   │   ├── FullView.qml    # Popup UI (cards)
+│   │   ├── UsageRing.qml   # Reusable progress ring
+│   │   ├── ModelRow.qml    # Model breakdown row
+│   │   ├── TrendChart.qml  # 7-day sparkline
 │   │   ├── configGeneral.qml # Settings UI
 │   │   └── Translations.qml # i18n (15 languages)
 │   └── icons/
@@ -157,6 +164,15 @@ GPL-3.0-or-later
 izll
 
 ## Version History
+
+### 2.0.0 (2026)
+- Complete UI redesign: card-based popup with progress rings, account info, 7-day usage trend
+- Dynamic per-model breakdown (Fable 5, Opus, Sonnet, and future models automatically)
+- Today's Tokens card: per-model token usage from local transcripts (ccusage-style)
+- New Mini Rings panel style (replaces Text/Circular/Bar styles)
+- Claude Code update indicator with one-click `claude update`
+- Plan name resolved from `~/.claude.json` tier fields (credentials `subscriptionType` can be stale)
+- main.qml split into focused view components (CompactView, FullView, UsageRing, ModelRow, TrendChart)
 
 ### 1.3.6 (2026)
 - Vertical layout option for taller panels (thanks @nahall, issue #5)

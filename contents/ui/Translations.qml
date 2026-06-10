@@ -63,7 +63,19 @@ QtObject {
             "Layout:": "Layout:",
             "Horizontal": "Horizontal",
             "Vertical": "Vertical",
-            "Background opacity (desktop):": "Background opacity (desktop):"
+            "Background opacity (desktop):": "Background opacity (desktop):",
+            "Account": "Account",
+            "Email": "Email",
+            "Plan": "Plan",
+            "resets in": "resets in",
+            "7-day trend": "7-day trend",
+            "session usage": "session usage",
+            "available": "available",
+            "Auto-retry in": "Auto-retry in",
+            "Other models aren't reported by the API yet": "Other models aren't reported by the API yet",
+            "Today's Tokens": "Today's Tokens",
+            "local logs": "local logs",
+            "out": "out"
         },
         "hu_HU": {
             "Claude Usage": "Claude használat",
