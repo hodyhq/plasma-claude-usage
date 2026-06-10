@@ -7,7 +7,7 @@ A KDE Plasma 6 widget that displays your Claude Code usage statistics in the tas
 ## Features
 
 - **Mini Rings Panel Display**: Anti-aliased progress rings with percentages right in your taskbar
-  ![Panel](screenshots/panel.png)
+  ![Panel](screenshots/panel_2.0.png)
 - **Color-coded Indicators**: Green (<50%), Yellow (<80%), Red (≥80%)
 - **Modern Card Popup**: Click to see full statistics
   - Account card with your email and subscription plan
