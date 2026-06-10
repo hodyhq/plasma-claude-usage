@@ -2,12 +2,12 @@
 
 A KDE Plasma 6 widget that displays your Claude Code usage statistics in the taskbar.
 
-![Popup](screenshots/popup_2.0.png)
+![Popup](screenshots/popup.png)
 
 ## Features
 
 - **Mini Rings Panel Display**: Anti-aliased progress rings with percentages right in your taskbar
-  ![Panel](screenshots/panel_2.0.png)
+  ![Panel](screenshots/panel.png)
 - **Color-coded Indicators**: Green (<50%), Yellow (<80%), Red (≥80%)
 - **Modern Card Popup**: Click to see full statistics
   - Account card with your email and subscription plan
@@ -16,6 +16,11 @@ A KDE Plasma 6 widget that displays your Claude Code usage statistics in the tas
   - 7-day usage trend sparkline (built from locally cached samples)
 - **Claude Code Update Indicator**: Orange chip + panel dot when a newer CLI version exists; click to run `claude update`
 - **Today's Tokens**: Per-model token counts (including models the API doesn't report, like Fable 5) parsed from local Claude Code transcripts — needs `python3`, card hides if unavailable
+- **Time-aware coloring + time marker**: a dot on each ring shows how much of the period has elapsed; rings turn red only when usage outpaces elapsed time (you may hit the limit before reset), not at arbitrary fixed thresholds
+- **Desktop notifications**: threshold alerts (50/80/95% session, 95% weekly — suppressed while you're on pace) and a "quota reset" notification when a nearly exhausted limit refills; toggle in settings
+- **Extra usage**: spend against your paid overage budget shown as a card when enabled on your account
+- **Multi-environment versions**: CLI, VS Code, Cursor, and Windsurf Claude Code versions side by side, so mismatches are obvious
+- **Live status footer**: "Updated 23s ago · Next update in 4m" ticking in real time
 - **Configurable Refresh**: Default 5 min polling (adjustable in settings)
 - **Smart Rate Limit Handling**: Uses `retry-after` header, exponential backoff, and token watcher for automatic recovery
 - **Local Cache**: Remembers last data on restart (up to 24h)
@@ -164,6 +169,13 @@ GPL-3.0-or-later
 izll
 
 ## Version History
+
+### 2.1.0 (2026)
+- Time-aware warn coloring + elapsed-time marker dot on rings (ported from Usage Monitor for Claude for Windows)
+- Desktop notifications for usage thresholds (time-aware) and quota resets, with settings toggle
+- Extra usage card (paid overage spend) when enabled on the account
+- Claude Code card showing CLI + IDE extension versions (VS Code, Cursor, Windsurf)
+- Live status footer with seconds-ago timer and next-update countdown
 
 ### 2.0.0 (2026)
 - Complete UI redesign: card-based popup with progress rings, account info, 7-day usage trend
