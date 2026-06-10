@@ -75,7 +75,7 @@ Item {
             Layout.preferredWidth: compact.ringSize
             Layout.preferredHeight: compact.ringSize
             percent: root.sessionUsagePercent
-            ringColor: root.getUsageColor(root.sessionUsagePercent)
+            ringColor: root.getUsageColor(root.sessionUsagePercent, root.sessionTimePct)
             lineWidth: Math.max(2.5, compact.ringSize / 9)
             opacity: compact.dimOpacity
         }
@@ -85,7 +85,7 @@ Item {
             Layout.preferredWidth: compact.ringSize
             Layout.preferredHeight: compact.ringSize
             percent: root.weeklyUsagePercent
-            ringColor: root.getUsageColor(root.weeklyUsagePercent)
+            ringColor: root.getUsageColor(root.weeklyUsagePercent, root.weeklyTimePct)
             lineWidth: Math.max(2.5, compact.ringSize / 9)
             opacity: compact.dimOpacity
         }
@@ -95,7 +95,7 @@ Item {
             Layout.preferredWidth: compact.ringSize
             Layout.preferredHeight: compact.ringSize
             percent: root.sonnetWeeklyPercent
-            ringColor: root.getUsageColor(root.sonnetWeeklyPercent)
+            ringColor: root.getUsageColor(root.sonnetWeeklyPercent, root.weeklyTimePct)
             lineWidth: Math.max(2.5, compact.ringSize / 9)
             opacity: compact.dimOpacity
         }

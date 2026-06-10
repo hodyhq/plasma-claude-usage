@@ -63,6 +63,17 @@ PlasmoidItem {
     // Today's per-model token usage parsed from local transcripts
     property var tokenStats: []       // [{model, name, total, output}] sorted by total desc
 
+    // v2.1: time-aware coloring, extra usage, installations, notifications
+    property double nowTick: Date.now()   // refreshed every 30s so elapsed-time bindings update
+    readonly property real sessionTimePct: elapsedPct(root.sessionResetTime, 18000000)       // 5h period
+    readonly property real weeklyTimePct: elapsedPct(root.weeklyResetTime, 604800000)        // 7d period
+    property bool extraEnabled: false
+    property real extraUsedCents: 0
+    property real extraLimitCents: 0
+    readonly property real extraPercent: root.extraLimitCents > 0 ? root.extraUsedCents / root.extraLimitCents * 100 : 0
+    property var installations: []    // [{name, version}] incl. CLI and IDE extensions
+    property var alertedThresholds: ({})  // field -> highest threshold already notified
+
     // Cache writer - saves last successful data to file
     Plasma5Support.DataSource {
         id: cacheWriter
@@ -93,6 +104,9 @@ PlasmoidItem {
                         root.hasOpusData = cache.hasOpus || false
                         root.modelUsage = cache.models || []
                         root.usageSamples = cache.samples || []
+                        root.extraEnabled = cache.extraEnabled || false
+                        root.extraUsedCents = cache.extraUsed || 0
+                        root.extraLimitCents = cache.extraLimit || 0
                         root.planName = cache.plan || ""
                         root.sessionReset = cache.sessionReset || ""
                         root.weeklyReset = cache.weeklyReset || ""
@@ -127,6 +141,9 @@ PlasmoidItem {
             weeklyResetTs: root.weeklyResetTime ? root.weeklyResetTime.getTime() : null,
             models: root.modelUsage,
             samples: root.usageSamples,
+            extraEnabled: root.extraEnabled,
+            extraUsed: root.extraUsedCents,
+            extraLimit: root.extraLimitCents,
             timestamp: Date.now()
         }
         var json = JSON.stringify(cache)
@@ -245,6 +262,7 @@ PlasmoidItem {
                 root.claudeVersion = match[1]
                 root.userAgent = "claude-code/" + match[1]
                 console.log("Claude Usage: Detected version:", root.claudeVersion)
+                refreshInstallations()
             }
         }
     }
@@ -315,6 +333,58 @@ PlasmoidItem {
         running: true
         repeat: true
         onTriggered: refreshTokenStats()
+    }
+
+    Timer {
+        id: clockTimer
+        interval: 30000
+        running: true
+        repeat: true
+        onTriggered: root.nowTick = Date.now()
+    }
+
+    // Detects Claude Code IDE extensions (VS Code, Cursor, Windsurf)
+    Plasma5Support.DataSource {
+        id: installsReader
+        engine: "executable"
+        connectedSources: []
+
+        onNewData: function(sourceName, data) {
+            var stdout = (data["stdout"] || "").trim()
+            disconnectSource(sourceName)
+            var found = []
+            if (root.claudeVersion !== "") {
+                found.push({ name: "CLI", version: root.claudeVersion })
+            }
+            if (stdout.length > 0) {
+                var lines = stdout.split("\n")
+                for (var i = 0; i < lines.length; i++) {
+                    var parts = lines[i].split("|")
+                    if (parts.length === 2 && parts[1]) {
+                        found.push({ name: parts[0], version: parts[1] })
+                    }
+                }
+            }
+            root.installations = found
+        }
+    }
+
+    function refreshInstallations() {
+        installsReader.connectSource("bash -c 'for p in \"VS Code:.vscode\" \"Cursor:.cursor\" \"Windsurf:.windsurf\"; do n=\"${p%%:*}\"; d=\"$HOME/${p#*:}/extensions\"; v=$(ls -d \"$d\"/anthropic.claude-code-* 2>/dev/null | sed -e \"s/.*claude-code-//\" -e \"s/-[a-z].*//\" | sort -V | tail -n1); [ -n \"$v\" ] && printf \"%s|%s\\n\" \"$n\" \"$v\"; done; true'")
+    }
+
+    // Desktop notifications via notify-send (libnotify -> KDE notifications)
+    Plasma5Support.DataSource {
+        id: notifier
+        engine: "executable"
+        connectedSources: []
+        onNewData: function(sourceName, data) { disconnectSource(sourceName) }
+    }
+
+    function sendNotification(title, body) {
+        if (Plasmoid.configuration.enableNotifications === false) return
+        var esc = function(s) { return String(s).replace(/'/g, "'\\''") }
+        notifier.connectSource("notify-send -a 'Claude Usage' -i claude-usage-widget '" + esc(title) + "' '" + esc(body) + "'")
     }
 
     function refreshTokenStats() {
@@ -419,6 +489,12 @@ PlasmoidItem {
                         root.sonnetWeeklyPercent = (models.find(function(x) { return x.key === "sonnet" }) || {percent: 0}).percent
                         root.opusWeeklyPercent = (models.find(function(x) { return x.key === "opus" }) || {percent: 0}).percent
 
+                        // Extra usage (paid overage budget)
+                        var extra = data.extra_usage || {}
+                        root.extraEnabled = !!extra.is_enabled && (extra.monthly_limit || 0) > 0
+                        root.extraUsedCents = extra.used_credits || 0
+                        root.extraLimitCents = extra.monthly_limit || 0
+
                         if (fiveHour.resets_at) {
                             root.sessionResetTime = new Date(fiveHour.resets_at)
                             root.sessionReset = Qt.formatTime(root.sessionResetTime, "hh:mm")
@@ -445,6 +521,8 @@ PlasmoidItem {
                         }
                         root.usageSamples = samples.filter(function(s) { return nowTs - s.t < 604800000 })
 
+                        root.nowTick = Date.now()
+                        checkAlerts()
                         saveCache()
 
                         console.log("Claude Usage: API success - session:", root.sessionUsagePercent, "weekly:", root.weeklyUsagePercent)
@@ -531,10 +609,71 @@ PlasmoidItem {
         onTriggered: loadCredentials()
     }
 
-    function getUsageColor(percent) {
-        if (percent < 50) return Kirigami.Theme.positiveTextColor
-        if (percent < 80) return Kirigami.Theme.neutralTextColor
-        return Kirigami.Theme.negativeTextColor
+    // Elapsed fraction of a usage period as 0-100, or -1 when unknown
+    function elapsedPct(resetTime, periodMs) {
+        if (!resetTime) return -1
+        var remaining = resetTime.getTime() - root.nowTick
+        if (remaining <= 0 || remaining > periodMs) return -1
+        return Math.max(0, Math.min(100, (periodMs - remaining) / periodMs * 100))
+    }
+
+    // Time-aware when timePct is known: red = usage outpaces elapsed time
+    // (you may hit the limit before reset), yellow = close to pace, green = on pace.
+    // Falls back to fixed thresholds when no period information exists.
+    function getUsageColor(percent, timePct) {
+        if (timePct === undefined || timePct === null || timePct < 0) {
+            if (percent < 50) return Kirigami.Theme.positiveTextColor
+            if (percent < 80) return Kirigami.Theme.neutralTextColor
+            return Kirigami.Theme.negativeTextColor
+        }
+        if (percent >= 100 || percent > timePct) return Kirigami.Theme.negativeTextColor
+        if (percent > timePct * 0.75) return Kirigami.Theme.neutralTextColor
+        return Kirigami.Theme.positiveTextColor
+    }
+
+    function formatDollars(cents) {
+        return "$" + (cents / 100).toFixed(2)
+    }
+
+    // Threshold + reset notifications, mirroring the Windows app's smart alerts:
+    // below 90% a threshold only fires when usage outpaces elapsed time.
+    function checkFieldAlert(field, label, percent, timePct, thresholds) {
+        var last = root.alertedThresholds[field] || 0
+
+        if (percent < thresholds[0]) {
+            if (last !== 0) {
+                var updated = root.alertedThresholds
+                updated[field] = 0
+                root.alertedThresholds = updated
+                if (last >= 95 && percent < 20) {
+                    sendNotification(i18n.tr("Quota Reset"), label + ": " + i18n.tr("quota has been reset. Claude is ready to use again."))
+                }
+            }
+            return
+        }
+
+        var crossed = 0
+        for (var i = 0; i < thresholds.length; i++) {
+            if (percent >= thresholds[i]) crossed = thresholds[i]
+        }
+        if (crossed <= last) return
+
+        var updatedUp = root.alertedThresholds
+        updatedUp[field] = crossed
+        root.alertedThresholds = updatedUp
+
+        // Time-aware suppression: on pace and below 90% -> stay quiet
+        if (crossed < 90 && timePct >= 0 && percent <= timePct) return
+
+        sendNotification(i18n.tr("Usage Notice"), label + " " + i18n.tr("usage has reached") + " " + Math.round(percent) + "%")
+    }
+
+    function checkAlerts() {
+        checkFieldAlert("session", i18n.tr("Session (5hr)"), root.sessionUsagePercent, root.sessionTimePct, [50, 80, 95])
+        checkFieldAlert("weekly", i18n.tr("Weekly (7day)"), root.weeklyUsagePercent, root.weeklyTimePct, [95])
+        if (root.extraEnabled) {
+            checkFieldAlert("extra", i18n.tr("Extra Usage"), root.extraPercent, -1, [50, 80, 95])
+        }
     }
 
     // Plan name resolution: known tier (account file first, then credentials),
@@ -671,6 +810,7 @@ PlasmoidItem {
         emailReader.connectSource("cat $HOME/.claude.json 2>/dev/null")
         checkForUpdate()
         refreshTokenStats()
+        refreshInstallations()
         loadCredentials()
     }
 
