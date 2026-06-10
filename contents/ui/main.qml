@@ -45,6 +45,24 @@ PlasmoidItem {
         ? root.rateLimitRetryMs + 60000
         : Math.max(Plasmoid.configuration.refreshInterval || 1, 1) * 60000 * 3
 
+    // v2.0: dynamic model breakdown, trend history, account email, update check
+    property var modelUsage: []          // [{key, name, percent}] from seven_day_* API keys
+    property var usageSamples: []        // [{t, session, weekly}] for the trend chart
+    property string accountEmail: ""
+    property string latestVersion: ""
+    readonly property bool updateAvailable: root.claudeVersion !== "" && root.latestVersion !== ""
+        && isNewerVersion(root.latestVersion, root.claudeVersion)
+    // Shared by both views: metrics render normally during token/rate-limit errors
+    readonly property bool metricsVisible: root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError
+
+    // Plan-name sources, most authoritative first (see updatePlanName)
+    property string accountTier: ""   // user/org rateLimitTier from ~/.claude.json (most current)
+    property string credsTier: ""     // rateLimitTier from credentials file
+    property string credsSub: ""      // subscriptionType from credentials file (may be stale)
+
+    // Today's per-model token usage parsed from local transcripts
+    property var tokenStats: []       // [{model, name, total, output}] sorted by total desc
+
     // Cache writer - saves last successful data to file
     Plasma5Support.DataSource {
         id: cacheWriter
@@ -73,6 +91,8 @@ PlasmoidItem {
                         root.opusWeeklyPercent = cache.opus || 0
                         root.hasSonnetData = cache.hasSonnet || false
                         root.hasOpusData = cache.hasOpus || false
+                        root.modelUsage = cache.models || []
+                        root.usageSamples = cache.samples || []
                         root.planName = cache.plan || ""
                         root.sessionReset = cache.sessionReset || ""
                         root.weeklyReset = cache.weeklyReset || ""
@@ -105,6 +125,8 @@ PlasmoidItem {
             weeklyReset: root.weeklyReset,
             sessionResetTs: root.sessionResetTime ? root.sessionResetTime.getTime() : null,
             weeklyResetTs: root.weeklyResetTime ? root.weeklyResetTime.getTime() : null,
+            models: root.modelUsage,
+            samples: root.usageSamples,
             timestamp: Date.now()
         }
         var json = JSON.stringify(cache)
@@ -180,14 +202,9 @@ PlasmoidItem {
                     var oauth = creds.claudeAiOauth || {}
                     root.accessToken = oauth.accessToken || ""
 
-                    // Get plan name from tier
-                    var tier = oauth.rateLimitTier || "default_claude_pro"
-                    var planMap = {
-                        "default_claude_pro": "Pro",
-                        "default_claude_max_5x": "Max 5x",
-                        "default_claude_max_20x": "Max 20x"
-                    }
-                    root.planName = planMap[tier] || tier
+                    root.credsTier = oauth.rateLimitTier || ""
+                    root.credsSub = oauth.subscriptionType || ""
+                    updatePlanName()
 
                     console.log("Claude Usage: Token found, plan:", root.planName)
 
@@ -230,6 +247,79 @@ PlasmoidItem {
                 console.log("Claude Usage: Detected version:", root.claudeVersion)
             }
         }
+    }
+
+    // Reads account email from Claude Code's config
+    Plasma5Support.DataSource {
+        id: emailReader
+        engine: "executable"
+        connectedSources: []
+
+        onNewData: function(sourceName, data) {
+            var stdout = (data["stdout"] || "").trim()
+            disconnectSource(sourceName)
+            if (stdout.length > 2) {
+                try {
+                    var acct = JSON.parse(stdout).oauthAccount || {}
+                    root.accountEmail = acct.emailAddress || ""
+                    // These tier fields are fresher than the credentials file
+                    root.accountTier = acct.userRateLimitTier || acct.organizationRateLimitTier || ""
+                    updatePlanName()
+                } catch (e) {
+                    console.log("Claude Usage: account info parse error:", e)
+                }
+            }
+        }
+    }
+
+    Timer {
+        id: updateCheckTimer
+        interval: 21600000  // 6 hours
+        running: true
+        repeat: true
+        onTriggered: checkForUpdate()
+    }
+
+    // Local token stats: parses ~/.claude/projects/*.jsonl via bundled python script
+    Plasma5Support.DataSource {
+        id: tokenStatsReader
+        engine: "executable"
+        connectedSources: []
+
+        onNewData: function(sourceName, data) {
+            var stdout = (data["stdout"] || "").trim()
+            disconnectSource(sourceName)
+            if (stdout.length < 2) return
+            try {
+                var result = JSON.parse(stdout)
+                var stats = []
+                for (var model in (result.models || {})) {
+                    var u = result.models[model]
+                    stats.push({
+                        model: model,
+                        name: prettyModelName(model),
+                        total: (u.input || 0) + (u.output || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0),
+                        output: u.output || 0
+                    })
+                }
+                root.tokenStats = sortModels(stats, "model")
+            } catch (e) {
+                console.log("Claude Usage: token stats parse error:", e)
+            }
+        }
+    }
+
+    Timer {
+        id: tokenStatsTimer
+        interval: 900000  // 15 minutes
+        running: true
+        repeat: true
+        onTriggered: refreshTokenStats()
+    }
+
+    function refreshTokenStats() {
+        var script = Qt.resolvedUrl("../scripts/token-stats.py").toString().replace("file://", "")
+        tokenStatsReader.connectSource("python3 '" + script + "' 2>/dev/null")
     }
 
     // Data source for launching claude in terminal
@@ -307,10 +397,27 @@ PlasmoidItem {
 
                         root.sessionUsagePercent = fiveHour.utilization || 0
                         root.weeklyUsagePercent = sevenDay.utilization || 0
-                        root.hasSonnetData = !!data.seven_day_sonnet
-                        root.hasOpusData = !!data.seven_day_opus
-                        root.sonnetWeeklyPercent = root.hasSonnetData ? (data.seven_day_sonnet.utilization || 0) : 0
-                        root.opusWeeklyPercent = root.hasOpusData ? (data.seven_day_opus.utilization || 0) : 0
+                        // Collect every per-model seven_day_* key dynamically.
+                        // Some seven_day_* keys are features, not models — exclude them.
+                        var nonModelKeys = ["oauth_apps", "cowork", "omelette"]
+                        var models = []
+                        for (var key in data) {
+                            var m = key.match(/^seven_day_(.+)$/)
+                            if (m && nonModelKeys.indexOf(m[1]) !== -1) continue
+                            if (m && data[key] && typeof data[key] === "object") {
+                                models.push({
+                                    key: m[1],
+                                    name: modelDisplayName(m[1]),
+                                    percent: data[key].utilization || 0
+                                })
+                            }
+                        }
+                        root.modelUsage = sortModels(models, "key")
+                        // Legacy properties kept for the panel sonnet toggle + cache compat
+                        root.hasSonnetData = models.some(function(x) { return x.key === "sonnet" })
+                        root.hasOpusData = models.some(function(x) { return x.key === "opus" })
+                        root.sonnetWeeklyPercent = (models.find(function(x) { return x.key === "sonnet" }) || {percent: 0}).percent
+                        root.opusWeeklyPercent = (models.find(function(x) { return x.key === "opus" }) || {percent: 0}).percent
 
                         if (fiveHour.resets_at) {
                             root.sessionResetTime = new Date(fiveHour.resets_at)
@@ -329,6 +436,15 @@ PlasmoidItem {
                         root.hasRateLimitError = false
                         root.rateLimitRetryCount = 0
                         root.rateLimitRetryMs = 0
+
+                        // Trend history: one sample per >=15 min, pruned to 7 days
+                        var samples = root.usageSamples.slice()
+                        var nowTs = Date.now()
+                        if (samples.length === 0 || nowTs - samples[samples.length - 1].t >= 900000) {
+                            samples.push({ t: nowTs, session: root.sessionUsagePercent, weekly: root.weeklyUsagePercent })
+                        }
+                        root.usageSamples = samples.filter(function(s) { return nowTs - s.t < 604800000 })
+
                         saveCache()
 
                         console.log("Claude Usage: API success - session:", root.sessionUsagePercent, "weekly:", root.weeklyUsagePercent)
@@ -370,6 +486,11 @@ PlasmoidItem {
         xhr.send()
     }
 
+    // Opens a terminal running the given claude command (konsole > gnome-terminal > xfce4-terminal > xterm)
+    function launchInTerminal(cmd) {
+        claudeLauncher.connectSource("bash -c 'cd $HOME && if command -v konsole >/dev/null; then konsole --hold -e env -u CLAUDECODE bash -lc \"" + cmd + "\"; elif command -v gnome-terminal >/dev/null; then gnome-terminal -- env -u CLAUDECODE bash -lc \"" + cmd + "; exec bash\"; elif command -v xfce4-terminal >/dev/null; then xfce4-terminal --hold -e \"env -u CLAUDECODE bash -lc \\\"" + cmd + "\\\"\"; elif command -v xterm >/dev/null; then xterm -hold -e env -u CLAUDECODE bash -lc \"" + cmd + "\"; fi &'")
+    }
+
     function refresh() {
         root.hasTokenError = false
         root.hasRateLimitError = false
@@ -381,658 +502,10 @@ PlasmoidItem {
     // Compact representation (panel)
     readonly property bool isVerticalLayout: Plasmoid.configuration.panelLayout === "vertical"
 
-    compactRepresentation: Item {
-        Layout.minimumWidth: usageRow.implicitWidth + Kirigami.Units.largeSpacing * 2
-        Layout.minimumHeight: root.isVerticalLayout ? usageRow.implicitHeight + Kirigami.Units.largeSpacing * 2 : Kirigami.Units.iconSizes.medium
-        Layout.preferredWidth: usageRow.implicitWidth + Kirigami.Units.largeSpacing * 2
-        Layout.preferredHeight: root.isVerticalLayout ? usageRow.implicitHeight + Kirigami.Units.largeSpacing * 2 : -1
-
-        MouseArea {
-            anchors.fill: parent
-            onClicked: root.expanded = !root.expanded
-        }
-
-        GridLayout {
-            id: usageRow
-            anchors.centerIn: parent
-            columns: root.isVerticalLayout ? 1 : -1
-            rows: root.isVerticalLayout ? -1 : 1
-            flow: root.isVerticalLayout ? GridLayout.TopToBottom : GridLayout.LeftToRight
-            columnSpacing: Kirigami.Units.smallSpacing
-            rowSpacing: Kirigami.Units.smallSpacing / 2
-
-            // Claude icon with error indicator
-            Item {
-                visible: Plasmoid.configuration.showIcon !== false
-                Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
-                Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
-                Layout.rightMargin: Kirigami.Units.smallSpacing
-
-                Kirigami.Icon {
-                    anchors.fill: parent
-                    source: Qt.resolvedUrl("../icons/claude.svg")
-                }
-
-                // Red dot for token/rate limit error
-                Rectangle {
-                    visible: root.hasTokenError || root.hasRateLimitError
-                    width: 8
-                    height: 8
-                    radius: 4
-                    color: Kirigami.Theme.negativeTextColor
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                    anchors.rightMargin: -2
-                    anchors.bottomMargin: -2
-                }
-            }
-
-            // Error state (non-token errors)
-            PlasmaComponents.Label {
-                visible: root.errorMsg !== "" && !root.hasTokenError && !root.hasRateLimitError
-                text: "⚠"
-                font.pixelSize: Kirigami.Theme.defaultFont.pixelSize
-                color: Kirigami.Theme.negativeTextColor
-            }
-
-            // === TEXT STYLE ===
-
-            // Session usage (text)
-            Rectangle {
-                visible: (!Plasmoid.configuration.panelStyle || Plasmoid.configuration.panelStyle === "text") && (Plasmoid.configuration.showSession !== false) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                Layout.preferredWidth: 10
-                Layout.preferredHeight: 10
-                radius: 5
-                color: getUsageColor(root.sessionUsagePercent)
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-            }
-
-            PlasmaComponents.Label {
-                visible: (!Plasmoid.configuration.panelStyle || Plasmoid.configuration.panelStyle === "text") && (Plasmoid.configuration.showSession !== false) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                text: Math.round(root.sessionUsagePercent) + "%"
-                font.pixelSize: Kirigami.Theme.defaultFont.pixelSize
-                font.bold: true
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-            }
-
-            // Separator session-weekly (text)
-            PlasmaComponents.Label {
-                visible: !root.isVerticalLayout && (!Plasmoid.configuration.panelStyle || Plasmoid.configuration.panelStyle === "text") && (Plasmoid.configuration.showSession !== false) && (Plasmoid.configuration.showWeekly !== false) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                text: "|"
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.25 : root.isStale ? 0.35 : 0.5
-                font.pixelSize: Kirigami.Theme.defaultFont.pixelSize
-            }
-
-            // Weekly usage (text)
-            Rectangle {
-                visible: (!Plasmoid.configuration.panelStyle || Plasmoid.configuration.panelStyle === "text") && (Plasmoid.configuration.showWeekly !== false) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                Layout.preferredWidth: 10
-                Layout.preferredHeight: 10
-                radius: 5
-                color: getUsageColor(root.weeklyUsagePercent)
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-            }
-
-            PlasmaComponents.Label {
-                visible: (!Plasmoid.configuration.panelStyle || Plasmoid.configuration.panelStyle === "text") && (Plasmoid.configuration.showWeekly !== false) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                text: Math.round(root.weeklyUsagePercent) + "%"
-                font.pixelSize: Kirigami.Theme.defaultFont.pixelSize
-                font.bold: true
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-            }
-
-            // Separator before sonnet (text)
-            PlasmaComponents.Label {
-                visible: !root.isVerticalLayout && (!Plasmoid.configuration.panelStyle || Plasmoid.configuration.panelStyle === "text") && (Plasmoid.configuration.showSonnet === true) && ((Plasmoid.configuration.showSession !== false) || (Plasmoid.configuration.showWeekly !== false)) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                text: "|"
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.25 : root.isStale ? 0.35 : 0.5
-                font.pixelSize: Kirigami.Theme.defaultFont.pixelSize
-            }
-
-            // Sonnet usage (text)
-            Rectangle {
-                visible: (!Plasmoid.configuration.panelStyle || Plasmoid.configuration.panelStyle === "text") && (Plasmoid.configuration.showSonnet === true) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                Layout.preferredWidth: 10
-                Layout.preferredHeight: 10
-                radius: 5
-                color: getUsageColor(root.sonnetWeeklyPercent)
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-            }
-
-            PlasmaComponents.Label {
-                visible: (!Plasmoid.configuration.panelStyle || Plasmoid.configuration.panelStyle === "text") && (Plasmoid.configuration.showSonnet === true) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                text: Math.round(root.sonnetWeeklyPercent) + "%"
-                font.pixelSize: Kirigami.Theme.defaultFont.pixelSize
-                font.bold: true
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-            }
-
-            // === CIRCULAR STYLE ===
-
-            // Session (circular)
-            Item {
-                visible: Plasmoid.configuration.panelStyle === "circular" && (Plasmoid.configuration.showSession !== false) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                Layout.preferredWidth: 28
-                Layout.preferredHeight: 28
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-
-                Canvas {
-                    anchors.fill: parent
-                    onPaint: {
-                        var ctx = getContext("2d")
-                        drawCircularProgress(ctx, width, height, root.sessionUsagePercent)
-                    }
-                    property real _percent: root.sessionUsagePercent
-                    on_PercentChanged: requestPaint()
-                    Component.onCompleted: requestPaint()
-                }
-
-                PlasmaComponents.Label {
-                    anchors.centerIn: parent
-                    text: Math.round(root.sessionUsagePercent)
-                    font.pixelSize: 9
-                    font.bold: true
-                }
-            }
-
-            // Weekly (circular)
-            Item {
-                visible: Plasmoid.configuration.panelStyle === "circular" && (Plasmoid.configuration.showWeekly !== false) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                Layout.preferredWidth: 28
-                Layout.preferredHeight: 28
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-
-                Canvas {
-                    anchors.fill: parent
-                    onPaint: {
-                        var ctx = getContext("2d")
-                        drawCircularProgress(ctx, width, height, root.weeklyUsagePercent)
-                    }
-                    property real _percent: root.weeklyUsagePercent
-                    on_PercentChanged: requestPaint()
-                    Component.onCompleted: requestPaint()
-                }
-
-                PlasmaComponents.Label {
-                    anchors.centerIn: parent
-                    text: Math.round(root.weeklyUsagePercent)
-                    font.pixelSize: 9
-                    font.bold: true
-                }
-            }
-
-            // Sonnet (circular)
-            Item {
-                visible: Plasmoid.configuration.panelStyle === "circular" && (Plasmoid.configuration.showSonnet === true) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                Layout.preferredWidth: 28
-                Layout.preferredHeight: 28
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-
-                Canvas {
-                    anchors.fill: parent
-                    onPaint: {
-                        var ctx = getContext("2d")
-                        drawCircularProgress(ctx, width, height, root.sonnetWeeklyPercent)
-                    }
-                    property real _percent: root.sonnetWeeklyPercent
-                    on_PercentChanged: requestPaint()
-                    Component.onCompleted: requestPaint()
-                }
-
-                PlasmaComponents.Label {
-                    anchors.centerIn: parent
-                    text: Math.round(root.sonnetWeeklyPercent)
-                    font.pixelSize: 9
-                    font.bold: true
-                }
-            }
-
-            // === BAR STYLE ===
-
-            // Session (bar)
-            Item {
-                visible: Plasmoid.configuration.panelStyle === "bar" && (Plasmoid.configuration.showSession !== false) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                Layout.preferredWidth: 32
-                Layout.preferredHeight: parent.height
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-
-                Rectangle {
-                    anchors.fill: parent
-                    radius: 3
-                    color: Kirigami.Theme.backgroundColor
-                    border.color: Kirigami.Theme.disabledTextColor
-                    border.width: 1
-
-                    Rectangle {
-                        anchors.bottom: parent.bottom
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.margins: 1
-                        height: Math.max((parent.height - 2) * Math.min(root.sessionUsagePercent / 100, 1), 1)
-                        radius: 2
-                        color: getUsageColor(root.sessionUsagePercent)
-                    }
-                }
-
-                PlasmaComponents.Label {
-                    anchors.centerIn: parent
-                    text: Math.round(root.sessionUsagePercent)
-                    font.pixelSize: 9
-                    font.bold: true
-                }
-            }
-
-            // Weekly (bar)
-            Item {
-                visible: Plasmoid.configuration.panelStyle === "bar" && (Plasmoid.configuration.showWeekly !== false) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                Layout.preferredWidth: 32
-                Layout.preferredHeight: parent.height
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-
-                Rectangle {
-                    anchors.fill: parent
-                    radius: 3
-                    color: Kirigami.Theme.backgroundColor
-                    border.color: Kirigami.Theme.disabledTextColor
-                    border.width: 1
-
-                    Rectangle {
-                        anchors.bottom: parent.bottom
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.margins: 1
-                        height: Math.max((parent.height - 2) * Math.min(root.weeklyUsagePercent / 100, 1), 1)
-                        radius: 2
-                        color: getUsageColor(root.weeklyUsagePercent)
-                    }
-                }
-
-                PlasmaComponents.Label {
-                    anchors.centerIn: parent
-                    text: Math.round(root.weeklyUsagePercent)
-                    font.pixelSize: 9
-                    font.bold: true
-                }
-            }
-
-            // Sonnet (bar)
-            Item {
-                visible: Plasmoid.configuration.panelStyle === "bar" && (Plasmoid.configuration.showSonnet === true) && (root.errorMsg === "" || root.hasTokenError || root.hasRateLimitError)
-                Layout.preferredWidth: 32
-                Layout.preferredHeight: parent.height
-                opacity: (root.hasTokenError || root.hasRateLimitError) ? 0.5 : root.isStale ? 0.6 : 1.0
-
-                Rectangle {
-                    anchors.fill: parent
-                    radius: 3
-                    color: Kirigami.Theme.backgroundColor
-                    border.color: Kirigami.Theme.disabledTextColor
-                    border.width: 1
-
-                    Rectangle {
-                        anchors.bottom: parent.bottom
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.margins: 1
-                        height: Math.max((parent.height - 2) * Math.min(root.sonnetWeeklyPercent / 100, 1), 1)
-                        radius: 2
-                        color: getUsageColor(root.sonnetWeeklyPercent)
-                    }
-                }
-
-                PlasmaComponents.Label {
-                    anchors.centerIn: parent
-                    text: Math.round(root.sonnetWeeklyPercent)
-                    font.pixelSize: 9
-                    font.bold: true
-                }
-            }
-
-            // Error text (non-token errors only)
-            PlasmaComponents.Label {
-                visible: root.errorMsg !== "" && !root.hasTokenError && !root.hasRateLimitError
-                text: root.errorMsg
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                color: Kirigami.Theme.negativeTextColor
-            }
-        }
-    }
+    compactRepresentation: CompactView {}
 
     // Full representation (popup)
-    fullRepresentation: Item {
-        Layout.minimumWidth: Kirigami.Units.gridUnit * 14
-        Layout.minimumHeight: Kirigami.Units.gridUnit * 16
-        Layout.preferredWidth: Kirigami.Units.gridUnit * 16
-        Layout.preferredHeight: Kirigami.Units.gridUnit * 18
-
-        ColumnLayout {
-            anchors.fill: parent
-            anchors.margins: Kirigami.Units.largeSpacing
-            spacing: Kirigami.Units.mediumSpacing
-
-            // Header
-            RowLayout {
-                Layout.fillWidth: true
-                PlasmaComponents.Label {
-                    text: i18n.tr("Claude Usage")
-                    font.bold: true
-                    font.pixelSize: Kirigami.Theme.defaultFont.pixelSize * 1.3
-                }
-                Item { Layout.fillWidth: true }
-                Rectangle {
-                    Layout.preferredWidth: planLabel.implicitWidth + Kirigami.Units.smallSpacing * 2
-                    Layout.preferredHeight: planLabel.implicitHeight + Kirigami.Units.smallSpacing
-                    radius: 3
-                    color: Kirigami.Theme.highlightColor
-                    PlasmaComponents.Label {
-                        id: planLabel
-                        anchors.centerIn: parent
-                        text: root.planName
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        color: Kirigami.Theme.highlightedTextColor
-                    }
-                }
-            }
-
-            // Error message (regular errors)
-            Rectangle {
-                visible: root.errorMsg !== "" && !root.hasTokenError && !root.hasRateLimitError
-                Layout.fillWidth: true
-                Layout.preferredHeight: errorColumn.implicitHeight + Kirigami.Units.largeSpacing
-                radius: 5
-                color: Kirigami.Theme.negativeBackgroundColor
-
-                ColumnLayout {
-                    id: errorColumn
-                    anchors.fill: parent
-                    anchors.margins: Kirigami.Units.smallSpacing
-
-                    PlasmaComponents.Label {
-                        text: "⚠ " + root.errorMsg
-                        color: Kirigami.Theme.negativeTextColor
-                        font.bold: true
-                    }
-                    PlasmaComponents.Label {
-                        text: root.baseUrl
-                            ? i18n.tr("Check base URL and API key in widget settings")
-                            : i18n.tr("Run 'claude' to log in")
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        color: Kirigami.Theme.negativeTextColor
-                    }
-                }
-            }
-
-            // Token error message
-            Rectangle {
-                visible: root.hasTokenError
-                Layout.fillWidth: true
-                Layout.preferredHeight: tokenErrorColumn.implicitHeight + Kirigami.Units.largeSpacing
-                radius: 5
-                color: Kirigami.Theme.negativeBackgroundColor
-
-                ColumnLayout {
-                    id: tokenErrorColumn
-                    anchors.fill: parent
-                    anchors.margins: Kirigami.Units.smallSpacing
-                    spacing: Kirigami.Units.smallSpacing
-
-                    PlasmaComponents.Label {
-                        text: "⚠ " + i18n.tr("Token expired")
-                        color: Kirigami.Theme.negativeTextColor
-                        font.bold: true
-                    }
-
-                    PlasmaComponents.Button {
-                        text: i18n.tr("Open Claude")
-                        icon.name: "utilities-terminal"
-                        onClicked: {
-                            claudeLauncher.connectSource("bash -c 'cd $HOME && if command -v konsole >/dev/null; then konsole --hold -e env -u CLAUDECODE bash -lc claude; elif command -v gnome-terminal >/dev/null; then gnome-terminal -- env -u CLAUDECODE bash -lc \"claude; exec bash\"; elif command -v xfce4-terminal >/dev/null; then xfce4-terminal --hold -e \"env -u CLAUDECODE bash -lc claude\"; elif command -v xterm >/dev/null; then xterm -hold -e env -u CLAUDECODE bash -lc claude; fi &'")
-                        }
-                    }
-                }
-            }
-
-            // Rate limit error message
-            Rectangle {
-                visible: root.hasRateLimitError
-                Layout.fillWidth: true
-                Layout.preferredHeight: rateLimitErrorColumn.implicitHeight + Kirigami.Units.largeSpacing
-                radius: 5
-                color: Kirigami.Theme.negativeBackgroundColor
-
-                ColumnLayout {
-                    id: rateLimitErrorColumn
-                    anchors.fill: parent
-                    anchors.margins: Kirigami.Units.smallSpacing
-                    spacing: Kirigami.Units.smallSpacing
-
-                    PlasmaComponents.Label {
-                        text: "⚠ " + i18n.tr("Rate limited")
-                        color: Kirigami.Theme.negativeTextColor
-                        font.bold: true
-                    }
-
-                    PlasmaComponents.Label {
-                        text: i18n.tr("Auto-retry in") + " " + Math.round(root.rateLimitBackoffMs / 60000) + " min"
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        color: Kirigami.Theme.negativeTextColor
-                    }
-                }
-            }
-
-            // Separator
-            Rectangle {
-                Layout.fillWidth: true
-                height: 1
-                color: Kirigami.Theme.disabledTextColor
-                opacity: 0.3
-            }
-
-            // Session Usage
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    PlasmaComponents.Label {
-                        text: i18n.tr("Session (5hr)")
-                        font.bold: true
-                    }
-                    Item { Layout.fillWidth: true }
-                    PlasmaComponents.Label {
-                        text: Math.round(root.sessionUsagePercent) + "%"
-                        color: getUsageColor(root.sessionUsagePercent)
-                        font.bold: true
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 10
-                    radius: 5
-                    color: Kirigami.Theme.backgroundColor
-                    border.color: Kirigami.Theme.disabledTextColor
-                    border.width: 1
-                    Rectangle {
-                        width: parent.width * Math.min(root.sessionUsagePercent / 100, 1)
-                        height: parent.height
-                        radius: 5
-                        color: getUsageColor(root.sessionUsagePercent)
-                    }
-                }
-
-                PlasmaComponents.Label {
-                    visible: root.sessionReset !== ""
-                    text: i18n.tr("Resets at:") + " " + root.sessionReset + (root.sessionResetTime ? " (" + formatTimeRemaining(root.sessionResetTime) + ")" : "")
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    color: Kirigami.Theme.disabledTextColor
-                }
-            }
-
-            // Weekly Usage
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: Kirigami.Units.smallSpacing
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    PlasmaComponents.Label {
-                        text: i18n.tr("Weekly (7day)")
-                        font.bold: true
-                    }
-                    Item { Layout.fillWidth: true }
-                    PlasmaComponents.Label {
-                        text: Math.round(root.weeklyUsagePercent) + "%"
-                        color: getUsageColor(root.weeklyUsagePercent)
-                        font.bold: true
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    height: 10
-                    radius: 5
-                    color: Kirigami.Theme.backgroundColor
-                    border.color: Kirigami.Theme.disabledTextColor
-                    border.width: 1
-                    Rectangle {
-                        width: parent.width * Math.min(root.weeklyUsagePercent / 100, 1)
-                        height: parent.height
-                        radius: 5
-                        color: getUsageColor(root.weeklyUsagePercent)
-                    }
-                }
-
-                PlasmaComponents.Label {
-                    visible: root.weeklyReset !== ""
-                    text: i18n.tr("Resets:") + " " + root.weeklyReset + (root.weeklyResetTime ? " (" + formatTimeRemaining(root.weeklyResetTime) + ")" : "")
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    color: Kirigami.Theme.disabledTextColor
-                }
-            }
-
-            // Separator
-            Rectangle {
-                Layout.fillWidth: true
-                height: 1
-                color: Kirigami.Theme.disabledTextColor
-                opacity: 0.3
-            }
-
-            // Model breakdown
-            PlasmaComponents.Label {
-                text: i18n.tr("By Model (Weekly)")
-                font.bold: true
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-            }
-
-            // Sonnet
-            RowLayout {
-                Layout.fillWidth: true
-                visible: root.hasSonnetData
-
-                PlasmaComponents.Label {
-                    text: i18n.tr("Sonnet")
-                }
-                Item { Layout.fillWidth: true }
-                Rectangle {
-                    Layout.preferredWidth: 60
-                    height: 8
-                    radius: 3
-                    color: Kirigami.Theme.backgroundColor
-                    border.color: Kirigami.Theme.disabledTextColor
-                    border.width: 1
-                    Rectangle {
-                        width: parent.width * Math.min(root.sonnetWeeklyPercent / 100, 1)
-                        height: parent.height
-                        radius: 3
-                        color: getUsageColor(root.sonnetWeeklyPercent)
-                    }
-                }
-                PlasmaComponents.Label {
-                    text: Math.round(root.sonnetWeeklyPercent) + "%"
-                    Layout.preferredWidth: 40
-                    horizontalAlignment: Text.AlignRight
-                }
-            }
-
-            // Opus
-            RowLayout {
-                Layout.fillWidth: true
-                visible: root.hasOpusData
-
-                PlasmaComponents.Label {
-                    text: i18n.tr("Opus")
-                }
-                Item { Layout.fillWidth: true }
-                Rectangle {
-                    Layout.preferredWidth: 60
-                    height: 8
-                    radius: 3
-                    color: Kirigami.Theme.backgroundColor
-                    border.color: Kirigami.Theme.disabledTextColor
-                    border.width: 1
-                    Rectangle {
-                        width: parent.width * Math.min(root.opusWeeklyPercent / 100, 1)
-                        height: parent.height
-                        radius: 3
-                        color: getUsageColor(root.opusWeeklyPercent)
-                    }
-                }
-                PlasmaComponents.Label {
-                    text: Math.round(root.opusWeeklyPercent) + "%"
-                    Layout.preferredWidth: 40
-                    horizontalAlignment: Text.AlignRight
-                }
-            }
-
-            // No model data message
-            PlasmaComponents.Label {
-                visible: !root.hasSonnetData && !root.hasOpusData
-                text: i18n.tr("No model breakdown available")
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                color: Kirigami.Theme.disabledTextColor
-                font.italic: true
-            }
-
-            // Rate limit warning
-            PlasmaComponents.Label {
-                visible: (Plasmoid.configuration.refreshInterval || 5) < 5
-                text: "⚠ " + i18n.tr("Values under 5 min may cause rate limiting")
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                color: Kirigami.Theme.neutralTextColor
-                font.italic: true
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-            }
-
-            Item { Layout.fillHeight: true }
-
-            // Footer
-            Rectangle {
-                Layout.fillWidth: true
-                height: 1
-                color: Kirigami.Theme.disabledTextColor
-                opacity: 0.3
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                PlasmaComponents.Label {
-                    text: root.lastUpdate !== "" ? i18n.tr("Updated:") + " " + root.lastUpdate : i18n.tr("Loading...")
-                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    color: Kirigami.Theme.disabledTextColor
-                }
-                Item { Layout.fillWidth: true }
-                PlasmaComponents.Button {
-                    icon.name: "view-refresh"
-                    text: i18n.tr("Refresh")
-                    onClicked: refresh()
-                }
-            }
-        }
-    }
+    fullRepresentation: FullView {}
 
     Timer {
         id: rateLimitRetryTimer
@@ -1058,40 +531,107 @@ PlasmoidItem {
         onTriggered: loadCredentials()
     }
 
-    function drawCircularProgress(ctx, w, h, percent) {
-        var centerX = w / 2
-        var centerY = h / 2
-        var radius = Math.min(w, h) / 2 - 2
-        var lineWidth = 3
-        var startAngle = -Math.PI / 2
-        var endAngle = startAngle + (2 * Math.PI * Math.min(percent, 100) / 100)
-
-        ctx.reset()
-
-        // Background circle
-        ctx.beginPath()
-        ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI)
-        ctx.strokeStyle = Kirigami.Theme.disabledTextColor
-        ctx.globalAlpha = 0.3
-        ctx.lineWidth = lineWidth
-        ctx.stroke()
-
-        // Progress arc
-        if (percent > 0) {
-            ctx.beginPath()
-            ctx.arc(centerX, centerY, radius, startAngle, endAngle)
-            ctx.strokeStyle = getUsageColor(percent)
-            ctx.globalAlpha = 1.0
-            ctx.lineWidth = lineWidth
-            ctx.lineCap = "round"
-            ctx.stroke()
-        }
-    }
-
     function getUsageColor(percent) {
         if (percent < 50) return Kirigami.Theme.positiveTextColor
         if (percent < 80) return Kirigami.Theme.neutralTextColor
         return Kirigami.Theme.negativeTextColor
+    }
+
+    // Plan name resolution: known tier (account file first, then credentials),
+    // then subscriptionType, then a prettified tier string.
+    function updatePlanName() {
+        if (root.baseUrl) return  // "API Key" mode keeps its label
+        var planMap = {
+            "default_claude_pro": "Pro",
+            "default_claude_max_5x": "Max 5x",
+            "default_claude_max_20x": "Max 20x"
+        }
+        var tier = root.accountTier || root.credsTier
+        if (planMap[tier]) {
+            root.planName = planMap[tier]
+        } else if (root.credsSub) {
+            root.planName = root.credsSub.charAt(0).toUpperCase() + root.credsSub.slice(1)
+        } else if (tier) {
+            root.planName = tier.replace(/^default_/, "").replace(/_/g, " ")
+                .replace(/\b\w/g, function(c) { return c.toUpperCase() })
+        }
+        console.log("Claude Usage: plan resolved:", root.planName, "(tier:", tier + ", sub:", root.credsSub + ")")
+    }
+
+    // Canonical model ordering: Fable > Opus > Sonnet > Haiku, newer versions first
+    function modelRank(id) {
+        var families = ["fable", "opus", "sonnet", "haiku"]
+        var lower = id.toLowerCase()
+        for (var i = 0; i < families.length; i++) {
+            if (lower.indexOf(families[i]) !== -1) return i
+        }
+        return families.length
+    }
+
+    function modelVersion(id) {
+        var m = id.toLowerCase().match(/(?:fable|opus|sonnet|haiku)[-_ ]?(\d+(?:[.-]\d+)?)/)
+        return m ? parseFloat(m[1].replace("-", ".")) : 0
+    }
+
+    function sortModels(list, idField) {
+        list.sort(function(a, b) {
+            var ra = modelRank(a[idField]), rb = modelRank(b[idField])
+            if (ra !== rb) return ra - rb
+            return modelVersion(b[idField]) - modelVersion(a[idField])
+        })
+        return list
+    }
+
+    // "claude-fable-5" -> "Fable 5", "claude-haiku-4-5-20251001" -> "Haiku 4.5"
+    function prettyModelName(id) {
+        var m = id.match(/(fable|opus|sonnet|haiku)[-_ ]?(\d+(?:[.-]\d+)?)?/i)
+        if (!m) return id
+        var family = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase()
+        var version = (m[2] || "").replace("-", ".")
+        return version ? family + " " + version : family
+    }
+
+    function formatTokens(n) {
+        if (n >= 1e9) return (n / 1e9).toFixed(1) + "B"
+        if (n >= 1e6) return (n / 1e6).toFixed(1) + "M"
+        if (n >= 1e3) return (n / 1e3).toFixed(1) + "k"
+        return "" + n
+    }
+
+    function modelDisplayName(key) {
+        if (key === "fable") return "Fable 5"
+        if (key === "sonnet") return i18n.tr("Sonnet")
+        if (key === "opus") return i18n.tr("Opus")
+        return key.charAt(0).toUpperCase() + key.slice(1)
+    }
+
+    function modelBarColor(key, percent) {
+        return key === "fable" ? "#D97757" : getUsageColor(percent)
+    }
+
+    // true if version a is newer than b ("2.1.85" vs "2.1.81")
+    function isNewerVersion(a, b) {
+        var pa = a.split(".").map(Number)
+        var pb = b.split(".").map(Number)
+        for (var i = 0; i < 3; i++) {
+            if ((pa[i] || 0) > (pb[i] || 0)) return true
+            if ((pa[i] || 0) < (pb[i] || 0)) return false
+        }
+        return false
+    }
+
+    function checkForUpdate() {
+        var xhr = new XMLHttpRequest()
+        xhr.open("GET", "https://registry.npmjs.org/@anthropic-ai/claude-code/latest")
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200) {
+                try {
+                    root.latestVersion = JSON.parse(xhr.responseText).version || ""
+                    console.log("Claude Usage: latest version:", root.latestVersion)
+                } catch (e) { /* silent — indicator simply doesn't show */ }
+            }
+        }
+        xhr.send()
     }
 
     function formatTimeRemaining(resetTime) {
@@ -1128,6 +668,9 @@ PlasmoidItem {
         iconInstaller.connectSource("bash -c 'ICON_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps && mkdir -p $ICON_DIR && cp \"" + iconSource + "\" $ICON_DIR/claude-usage-widget.svg && chmod 644 $ICON_DIR/claude-usage-widget.svg 2>/dev/null'")
         cacheReader.connectSource("cat $HOME/.local/share/claude-usage-cache.json 2>/dev/null")
         versionReader.connectSource("claude --version 2>/dev/null")
+        emailReader.connectSource("cat $HOME/.claude.json 2>/dev/null")
+        checkForUpdate()
+        refreshTokenStats()
         loadCredentials()
     }
 
