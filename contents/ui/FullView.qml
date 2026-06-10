@@ -17,6 +17,32 @@ Item {
     readonly property color accent: "#D97757"
     readonly property color cardColor: Qt.alpha(Kirigami.Theme.textColor, 0.07)
 
+    // Live status footer ("Updated 23s ago · Next update in 4m")
+    property double footerNow: Date.now()
+
+    Timer {
+        interval: 1000
+        running: full.visible
+        repeat: true
+        onTriggered: full.footerNow = Date.now()
+    }
+
+    readonly property string statusText: {
+        if (root.lastSuccessTime <= 0) return i18n.tr("Loading...")
+        var ago = Math.max(0, Math.floor((full.footerNow - root.lastSuccessTime) / 1000))
+        var duration
+        if (ago < 60) duration = ago + "s"
+        else if (ago < 3600) duration = Math.floor(ago / 60) + "m"
+        else duration = Math.floor(ago / 3600) + "h " + Math.floor((ago % 3600) / 60) + "m"
+        var text = i18n.tr("Updated {duration} ago").replace("{duration}", duration)
+        var nextPoll = root.lastFetchTime + Math.max(Plasmoid.configuration.refreshInterval || 5, 1) * 60000
+        if (ago >= 60 && nextPoll > full.footerNow && !root.hasRateLimitError) {
+            var untilMin = Math.ceil((nextPoll - full.footerNow) / 60000)
+            text += " · " + i18n.tr("Next update in {duration}").replace("{duration}", untilMin + "m")
+        }
+        return text
+    }
+
     Layout.minimumWidth: Kirigami.Units.gridUnit * 16
     Layout.preferredWidth: Kirigami.Units.gridUnit * 17
     Layout.minimumHeight: mainColumn.implicitHeight + Kirigami.Units.largeSpacing * 2
@@ -224,7 +250,8 @@ Item {
                         Layout.preferredWidth: 64
                         Layout.preferredHeight: 64
                         percent: root.sessionUsagePercent
-                        ringColor: root.getUsageColor(root.sessionUsagePercent)
+                        ringColor: root.getUsageColor(root.sessionUsagePercent, root.sessionTimePct)
+                        markerRel: root.sessionTimePct >= 0 ? root.sessionTimePct / 100 : -1
                         lineWidth: 5
                         showPercentSign: true
                         fontScale: 0.22
@@ -262,7 +289,8 @@ Item {
                         Layout.preferredWidth: 64
                         Layout.preferredHeight: 64
                         percent: root.weeklyUsagePercent
-                        ringColor: root.getUsageColor(root.weeklyUsagePercent)
+                        ringColor: root.getUsageColor(root.weeklyUsagePercent, root.weeklyTimePct)
+                        markerRel: root.weeklyTimePct >= 0 ? root.weeklyTimePct / 100 : -1
                         lineWidth: 5
                         showPercentSign: true
                         fontScale: 0.22
@@ -296,7 +324,7 @@ Item {
                     required property var modelData
                     label: modelData.name
                     percent: modelData.percent
-                    barColor: root.modelBarColor(modelData.key, modelData.percent)
+                    barColor: modelData.key === "fable" ? "#D97757" : root.getUsageColor(modelData.percent, root.weeklyTimePct)
                 }
             }
 
@@ -307,6 +335,40 @@ Item {
                 opacity: 0.45
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
+            }
+        }
+
+        // ===== Extra usage card (paid overage budget) =====
+        Card {
+            visible: root.extraEnabled
+
+            SectionLabel { text: i18n.tr("Extra Usage") }
+
+            RowLayout {
+                Layout.fillWidth: true
+                PlasmaComponents.Label {
+                    text: root.formatDollars(root.extraUsedCents) + " / " + root.formatDollars(root.extraLimitCents) + " " + i18n.tr("spent")
+                }
+                Item { Layout.fillWidth: true }
+                PlasmaComponents.Label {
+                    text: Math.round(root.extraPercent) + "%"
+                    font.bold: true
+                    color: root.getUsageColor(root.extraPercent)
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 6
+                radius: 3
+                color: Qt.alpha(Kirigami.Theme.textColor, 0.15)
+
+                Rectangle {
+                    width: parent.width * Math.min(root.extraPercent / 100, 1)
+                    height: parent.height
+                    radius: 3
+                    color: root.getUsageColor(root.extraPercent)
+                }
             }
         }
 
@@ -376,6 +438,27 @@ Item {
             }
         }
 
+        // ===== Claude Code installations (CLI + IDE extensions) =====
+        Card {
+            visible: root.installations.length > 0
+
+            SectionLabel { text: "Claude Code" }
+
+            Repeater {
+                model: root.installations
+                delegate: RowLayout {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    PlasmaComponents.Label {
+                        text: modelData.name
+                        opacity: 0.65
+                    }
+                    Item { Layout.fillWidth: true }
+                    PlasmaComponents.Label { text: modelData.version }
+                }
+            }
+        }
+
         // Refresh-interval warning (unchanged behavior)
         PlasmaComponents.Label {
             visible: (Plasmoid.configuration.refreshInterval || 5) < 5
@@ -417,18 +500,11 @@ Item {
             }
 
             PlasmaComponents.Label {
-                visible: !root.updateAvailable && root.claudeVersion !== ""
-                text: "CLI " + root.claudeVersion
+                text: full.statusText
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                 opacity: 0.65
-            }
-
-            PlasmaComponents.Label {
-                text: root.lastUpdate !== ""
-                    ? "· " + i18n.tr("Updated:") + " " + root.lastUpdate
-                    : i18n.tr("Loading...")
-                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                opacity: 0.65
+                elide: Text.ElideRight
+                Layout.fillWidth: false
             }
 
             Item { Layout.fillWidth: true }
