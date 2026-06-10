@@ -55,12 +55,12 @@ Item {
         Layout.fillWidth: true
         radius: Kirigami.Units.cornerRadius
         color: full.cardColor
-        implicitHeight: inner.implicitHeight + Kirigami.Units.largeSpacing * 2
+        implicitHeight: inner.implicitHeight + Kirigami.Units.mediumSpacing * 2
 
         ColumnLayout {
             id: inner
             anchors.fill: parent
-            anchors.margins: Kirigami.Units.largeSpacing
+            anchors.margins: Kirigami.Units.mediumSpacing
             spacing: Kirigami.Units.smallSpacing
         }
     }
@@ -78,7 +78,7 @@ Item {
         id: mainColumn
         anchors.fill: parent
         anchors.margins: Kirigami.Units.largeSpacing
-        spacing: Kirigami.Units.mediumSpacing
+        spacing: Kirigami.Units.smallSpacing
 
         // ===== Header =====
         RowLayout {
@@ -237,18 +237,18 @@ Item {
                 Layout.fillWidth: true
                 radius: Kirigami.Units.cornerRadius
                 color: full.cardColor
-                implicitHeight: sessionCol.implicitHeight + Kirigami.Units.largeSpacing * 2
+                implicitHeight: sessionCol.implicitHeight + Kirigami.Units.mediumSpacing * 2
 
                 ColumnLayout {
                     id: sessionCol
                     anchors.fill: parent
-                    anchors.margins: Kirigami.Units.largeSpacing
+                    anchors.margins: Kirigami.Units.mediumSpacing
                     spacing: Kirigami.Units.smallSpacing
 
                     UsageRing {
                         Layout.alignment: Qt.AlignHCenter
-                        Layout.preferredWidth: 64
-                        Layout.preferredHeight: 64
+                        Layout.preferredWidth: 56
+                        Layout.preferredHeight: 56
                         percent: root.sessionUsagePercent
                         ringColor: root.getUsageColor(root.sessionUsagePercent, root.sessionTimePct)
                         markerRel: root.sessionTimePct >= 0 ? root.sessionTimePct / 100 : -1
@@ -276,18 +276,18 @@ Item {
                 Layout.fillWidth: true
                 radius: Kirigami.Units.cornerRadius
                 color: full.cardColor
-                implicitHeight: weeklyCol.implicitHeight + Kirigami.Units.largeSpacing * 2
+                implicitHeight: weeklyCol.implicitHeight + Kirigami.Units.mediumSpacing * 2
 
                 ColumnLayout {
                     id: weeklyCol
                     anchors.fill: parent
-                    anchors.margins: Kirigami.Units.largeSpacing
+                    anchors.margins: Kirigami.Units.mediumSpacing
                     spacing: Kirigami.Units.smallSpacing
 
                     UsageRing {
                         Layout.alignment: Qt.AlignHCenter
-                        Layout.preferredWidth: 64
-                        Layout.preferredHeight: 64
+                        Layout.preferredWidth: 56
+                        Layout.preferredHeight: 56
                         percent: root.weeklyUsagePercent
                         ringColor: root.getUsageColor(root.weeklyUsagePercent, root.weeklyTimePct)
                         markerRel: root.weeklyTimePct >= 0 ? root.weeklyTimePct / 100 : -1
